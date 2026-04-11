@@ -1,10 +1,12 @@
 import json
+import threading
 import streamlit as st
 from pathlib import Path
 
 from engine.impact import calculate_impact, aggregate_portfolio_impact
 from utils.styles import CSS
 from views import onboarding, overview, feed, detail, brief
+from data.fetcher import check_and_refresh, get_fetch_status
 
 
 # ── Page config ──────────────────────────────────────────────────────────
@@ -16,6 +18,19 @@ st.set_page_config(
 )
 
 st.markdown(CSS, unsafe_allow_html=True)
+
+
+# ── EUR-Lex background refresh (non-blocking) ─────────────────────────────
+def _background_refresh():
+    try:
+        check_and_refresh()
+    except Exception:
+        pass
+
+if "eurlex_refresh_started" not in st.session_state:
+    st.session_state["eurlex_refresh_started"] = True
+    t = threading.Thread(target=_background_refresh, daemon=True)
+    t.start()
 
 
 # ── Data loading ─────────────────────────────────────────────────────────
@@ -124,6 +139,46 @@ with st.sidebar:
         </span>
     </div>
     """, unsafe_allow_html=True)
+
+    st.markdown("<hr class='rg-divider'>", unsafe_allow_html=True)
+
+    # EUR-Lex source status
+    st.markdown("""
+    <div style="font-size:10px; color:#4a6080; letter-spacing:0.1em;
+                text-transform:uppercase; margin-bottom:8px;">EUR-Lex sources</div>
+    """, unsafe_allow_html=True)
+
+    fetch_status = get_fetch_status()
+    for reg_id, s in fetch_status.items():
+        if s.get("fetched"):
+            age = s.get("age_days", 0)
+            count = s.get("article_count", 0)
+            stale = s.get("stale", False)
+            dot_color = "#e8a020" if stale else "#2db87a"
+            label = f"~{age}d ago" if age > 0 else "today"
+            st.markdown(f"""
+            <div style="display:flex; justify-content:space-between; align-items:center;
+                        font-size:11px; color:#8a9bb8; padding:3px 0;">
+                <div style="display:flex; align-items:center; gap:6px;">
+                    <div style="width:6px; height:6px; border-radius:50%;
+                                background:{dot_color}; flex-shrink:0;"></div>
+                    {reg_id}
+                </div>
+                <div style="color:#4a6080;">{count} art · {label}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div style="display:flex; justify-content:space-between; align-items:center;
+                        font-size:11px; color:#4a6080; padding:3px 0;">
+                <div style="display:flex; align-items:center; gap:6px;">
+                    <div style="width:6px; height:6px; border-radius:50%;
+                                background:#2a3a50; flex-shrink:0;"></div>
+                    {reg_id}
+                </div>
+                <div>fetching…</div>
+            </div>
+            """, unsafe_allow_html=True)
 
     st.markdown("<hr class='rg-divider'>", unsafe_allow_html=True)
 

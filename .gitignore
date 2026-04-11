@@ -7,3 +7,5 @@ venv/
 *.egg-info/
 dist/
 build/
+data/fetched/*.json
+data/fetch_meta.json
