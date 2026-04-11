@@ -5,7 +5,7 @@ from pathlib import Path
 
 from engine.impact import calculate_impact, aggregate_portfolio_impact
 from utils.styles import CSS
-from views import onboarding, overview, feed, detail, brief
+from views import onboarding, overview, feed, detail, brief, requirements
 from data.fetcher import check_and_refresh, get_fetch_status
 
 
@@ -24,6 +24,8 @@ st.markdown(CSS, unsafe_allow_html=True)
 def _background_refresh():
     try:
         check_and_refresh()
+        from engine.mapper import invalidate_cache
+        invalidate_cache()
     except Exception:
         pass
 
@@ -95,12 +97,15 @@ with st.sidebar:
     nav_items = [
         ("overview", "◈  Overview"),
         ("feed", "≡  Developments"),
+        ("requirements", "⊞  Requirements"),
         ("brief", "⊟  Executive Brief"),
     ]
 
     current_view = st.session_state.get("view", "overview")
     if current_view == "detail":
         current_view = "feed"
+    if current_view not in ("overview", "feed", "requirements", "brief"):
+        current_view = "overview"
 
     for view_key, label in nav_items:
         is_active = current_view == view_key
@@ -205,6 +210,9 @@ elif view == "detail":
     else:
         st.session_state["view"] = "feed"
         st.rerun()
+
+elif view == "requirements":
+    requirements.render()
 
 elif view == "brief":
     brief.render(regulations, assessments, portfolio)
