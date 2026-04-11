@@ -1,5 +1,12 @@
 CSS = """
 <style>
+/* ── Hide Streamlit dev artifacts ───────────────────────── */
+[data-testid="stToolbar"]       { display: none !important; }
+[data-testid="stDecoration"]    { display: none !important; }
+[data-testid="stStatusWidget"]  { display: none !important; }
+#MainMenu                       { visibility: hidden !important; }
+footer                          { visibility: hidden !important; }
+
 /* ── Base ───────────────────────────────────────────────── */
 html, body, [class*="css"] {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -365,6 +372,22 @@ div[data-testid="stForm"] {
 }
 .stButton > button:hover {
     background: #2d55d0 !important;
+}
+
+/* ── Onboarding CTA — high contrast ────────────────────── */
+[data-testid="stForm"] .stButton > button {
+    background: #ffffff !important;
+    color: #0a0f1e !important;
+    font-size: 14px !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.06em !important;
+    padding: 14px 24px !important;
+    border-radius: 4px !important;
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.15) !important;
+}
+[data-testid="stForm"] .stButton > button:hover {
+    background: #e8edf5 !important;
+    color: #0a0f1e !important;
 }
 
 /* Secondary / ghost button */

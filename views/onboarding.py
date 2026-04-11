@@ -15,6 +15,40 @@ def render():
             Regalith maps regulation onto your specific operating model.
             Answer a few questions to calibrate the impact analysis.
         </div>
+
+        <!-- Step indicator -->
+        <div style="display:flex; align-items:center; justify-content:center;
+                    gap:0; margin: 28px auto 0; max-width:320px;">
+            <!-- Step 1 -->
+            <div style="display:flex; flex-direction:column; align-items:center; gap:6px;">
+                <div style="width:28px; height:28px; border-radius:50%;
+                            background:#3d6af5; color:#ffffff;
+                            font-size:12px; font-weight:700;
+                            display:flex; align-items:center; justify-content:center;">
+                    1
+                </div>
+                <div style="font-size:10px; font-weight:600; color:#3d6af5;
+                            letter-spacing:0.08em; text-transform:uppercase;">
+                    Company profile
+                </div>
+            </div>
+            <!-- Connector -->
+            <div style="flex:1; height:2px; background:#1e2d4a;
+                        margin: 0 12px; margin-bottom:20px;"></div>
+            <!-- Step 2 -->
+            <div style="display:flex; flex-direction:column; align-items:center; gap:6px;">
+                <div style="width:28px; height:28px; border-radius:50%;
+                            background:#1e2d4a; color:#4a6080;
+                            font-size:12px; font-weight:700;
+                            display:flex; align-items:center; justify-content:center;">
+                    2
+                </div>
+                <div style="font-size:10px; font-weight:600; color:#4a6080;
+                            letter-spacing:0.08em; text-transform:uppercase;">
+                    Intelligence layer
+                </div>
+            </div>
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
