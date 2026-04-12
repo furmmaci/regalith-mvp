@@ -5,7 +5,7 @@ from pathlib import Path
 
 from engine.impact import calculate_impact, aggregate_portfolio_impact
 from utils.styles import CSS
-from views import onboarding, overview, feed, detail, brief, requirements
+from views import onboarding, overview, feed, detail, brief, requirements, results
 from data.fetcher import check_and_refresh, get_fetch_status
 
 
@@ -68,6 +68,11 @@ portfolio = aggregate_portfolio_impact(list(assessments.values())) if profile el
 # ── Onboarding gate ───────────────────────────────────────────────────────
 if not profile:
     onboarding.render()
+    st.stop()
+
+# ── Results dashboard — no sidebar, full focus ────────────────────────────
+if st.session_state.get("view") == "results":
+    results.render()
     st.stop()
 
 

@@ -135,5 +135,5 @@ def render():
                 "has_remote_onboarding": has_remote,
                 "has_crypto": has_crypto,
             }
-            st.session_state["view"] = "overview"
+            st.session_state["view"] = "results"
             st.rerun()

@@ -333,6 +333,17 @@ html, body, [class*="css"] {
     margin: 20px 0;
 }
 
+/* ── Obligations table row hover ─────────────────────── */
+table tr:hover td {
+    background: rgba(61, 106, 245, 0.04) !important;
+}
+table td {
+    padding: 12px 12px;
+    border-bottom: 1px solid #0f1d35;
+    vertical-align: top;
+    transition: background 0.1s;
+}
+
 /* ── Nav sidebar ────────────────────────────────────────── */
 section[data-testid="stSidebar"] {
     background-color: #070c1a !important;
