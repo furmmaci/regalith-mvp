@@ -170,13 +170,12 @@ def render():
 
     with col_pdf:
         try:
-            from utils.pdf_report import generate_pdf
+            from utils.pdf_report import generate_pdf, pdf_filename
             pdf_bytes = generate_pdf(profile, records)
-            filename  = f"regalith-obligations-{company.lower().replace(' ','_')}.pdf"
             st.download_button(
                 label="Download PDF report ↓",
                 data=pdf_bytes,
-                file_name=filename,
+                file_name=pdf_filename(company),
                 mime="application/pdf",
                 use_container_width=True,
             )

@@ -1,329 +1,553 @@
 """
-PDF report generation for Regalith Intelligence.
-Produces a professional obligations report from a mapped profile.
+PDF report generation using ReportLab.
+Replaces the fpdf2 implementation with a properly structured,
+multi-section report with cover page, profile summary, and
+obligations table grouped by regulation.
 """
 
 from __future__ import annotations
 
+import html
+import re
 from datetime import date
+from io import BytesIO
 from typing import Any
 
-from fpdf import FPDF, XPos, YPos
+from reportlab.lib.colors import HexColor, white, black
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import (
+    BaseDocTemplate,
+    Frame,
+    HRFlowable,
+    KeepTogether,
+    NextPageTemplate,
+    PageBreak,
+    PageTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
+# ── Dimensions ────────────────────────────────────────────────────────────
 
-# ── Colour palette (light PDF — inverted from UI dark theme) ──────────────
-_NAVY      = (10,  15,  30)
-_SLATE     = (74,  96,  128)
-_SILVER    = (168, 187, 208)
-_WHITE     = (255, 255, 255)
-_LIGHT_BG  = (245, 247, 252)
-_RULE_LINE = (220, 226, 238)
+W, H      = A4
+MARGIN    = 20 * mm
+CONTENT_W = W - 2 * MARGIN
 
-_SEV_COLORS = {
-    "critical":      (220, 53,  53),
-    "important":     (220, 148, 20),
-    "informational": (80,  120, 220),
+# ── Colour palette ─────────────────────────────────────────────────────────
+
+C_NAVY      = HexColor("#0a0f1e")
+C_NAVY_MID  = HexColor("#0f1729")
+C_RULE      = HexColor("#1e2d4a")
+C_BLUE      = HexColor("#3d6af5")
+C_SLATE     = HexColor("#4a6080")
+C_SILVER    = HexColor("#8a9bb8")
+C_LIGHT_BG  = HexColor("#f5f7fc")
+C_RULE_LIGHT= HexColor("#dde3ef")
+C_CRITICAL  = HexColor("#e84040")
+C_IMPORTANT = HexColor("#e8a020")
+C_INFO      = HexColor("#6b8ef5")
+C_MICA      = HexColor("#2db87a")
+C_PSD3      = HexColor("#e8a020")
+
+REG_COLORS = {"DORA": C_BLUE, "MiCA": C_MICA, "PSD3": C_PSD3}
+SEV_COLORS = {
+    "critical":      C_CRITICAL,
+    "important":     C_IMPORTANT,
+    "informational": C_INFO,
+}
+REG_NAMES = {
+    "DORA": "Digital Operational Resilience Act (EU) 2022/2554",
+    "MiCA": "Markets in Crypto-Assets Regulation (EU) 2023/1114",
+    "PSD3": "Payment Services Directive 3 — Commission Proposal",
 }
 
-_REG_COLORS = {
-    "DORA": (61,  106, 245),
-    "MiCA": (45,  184, 122),
-    "PSD3": (220, 148, 20),
-}
 
-# Column widths (portrait A4, 170 mm usable)
-_COL = {
-    "reg":       22,
-    "article":   24,
-    "obligation":82,
-    "deadline":  24,
-    "severity":  18,
-}
-
-_ROW_H   = 6    # base cell height
-_HEAD_H  = 7    # header row height
-
-
-class _RegalithPDF(FPDF):
-    def __init__(self, company: str, today: str):
-        super().__init__()
-        self._company = company
-        self._today   = today
-        self.set_margins(20, 20, 20)
-        self.set_auto_page_break(auto=True, margin=20)
-
-    def header(self):
-        if self.page_no() == 1:
-            return
-        self.set_font("Helvetica", "B", 7)
-        self.set_text_color(*_SLATE)
-        self.cell(0, 6, f"REGALITH INTELLIGENCE  ·  {self._company}  ·  Regulatory Obligations Report",
-                  new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-        self.set_draw_color(*_RULE_LINE)
-        self.line(20, self.get_y(), 190, self.get_y())
-        self.ln(3)
-
-    def footer(self):
-        self.set_y(-15)
-        self.set_font("Helvetica", "", 7)
-        self.set_text_color(*_SLATE)
-        self.cell(0, 5,
-                  f"Page {self.page_no()}  ·  Generated {self._today}  ·  "
-                  "Ranges reflect medium confidence estimates. Not legal advice.",
-                  align="C")
-
+# ── Public API ──────────────────────────────────────────────────────────────
 
 def generate_pdf(profile: dict[str, Any], records: list[dict[str, Any]]) -> bytes:
-    company    = profile.get("company_name", "Company")
-    lt         = profile.get("license_type", "")
-    juris      = ", ".join(profile.get("jurisdictions", []))
-    today      = date.today().strftime("%d %B %Y")
+    company  = profile.get("company_name", "Company")
+    lt       = profile.get("license_type", "")
+    juris    = ", ".join(profile.get("jurisdictions", []))
+    today    = date.today().strftime("%d %B %Y")
 
     total        = len(records)
     critical     = sum(1 for r in records if r["severity"] == "critical")
     important    = sum(1 for r in records if r["severity"] == "important")
-    informational = sum(1 for r in records if r["severity"] == "informational")
-    by_reg       = {}
+    informational= sum(1 for r in records if r["severity"] == "informational")
+
+    # Group by regulation, preserve order
+    by_reg: dict[str, list] = {}
     for r in records:
-        by_reg[r["regulation_id"]] = by_reg.get(r["regulation_id"], 0) + 1
+        by_reg.setdefault(r["regulation_id"], []).append(r)
 
-    # Sanitise all profile strings once
-    company = _clean(company)
-    lt      = _clean(lt)
-    juris   = _clean(juris)
+    buf  = BytesIO()
+    doc  = _build_doc(buf, company)
+    styles = _styles()
 
-    pdf = _RegalithPDF(company, today)
-    pdf.add_page()
+    # ── Page callbacks ─────────────────────────────────────────────────────
+    def on_cover(canvas, doc):
+        canvas.saveState()
+        canvas.setFillColor(C_NAVY)
+        canvas.rect(0, 0, W, H, fill=1, stroke=0)
+        # Blue top strip
+        canvas.setFillColor(C_BLUE)
+        canvas.rect(0, H - 6 * mm, W, 6 * mm, fill=1, stroke=0)
+        # Blue bottom strip
+        canvas.rect(0, 0, W, 3 * mm, fill=1, stroke=0)
+        canvas.restoreState()
 
-    # ── Cover ─────────────────────────────────────────────────────────────
-    pdf.set_font("Helvetica", "B", 9)
-    pdf.set_text_color(*_SLATE)
-    pdf.cell(0, 6, "REGALITH INTELLIGENCE",
-             new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    def on_content(canvas, doc):
+        canvas.saveState()
+        # Top rule
+        canvas.setStrokeColor(C_RULE_LIGHT)
+        canvas.setLineWidth(0.5)
+        canvas.line(MARGIN, H - 16 * mm, W - MARGIN, H - 16 * mm)
+        # Header text
+        canvas.setFont("Helvetica-Bold", 7)
+        canvas.setFillColor(C_BLUE)
+        canvas.drawString(MARGIN, H - 11 * mm, "REGALITH INTELLIGENCE")
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(C_SLATE)
+        label = f"{company} — Regulatory Obligations Report"
+        canvas.drawRightString(W - MARGIN, H - 11 * mm, label)
+        # Bottom rule
+        canvas.line(MARGIN, 16 * mm, W - MARGIN, 16 * mm)
+        # Footer
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(C_SLATE)
+        canvas.drawCentredString(
+            W / 2, 10 * mm,
+            "Powered by Regalith Intelligence \u2013 not legal advice"
+        )
+        canvas.setFillColor(C_SILVER)
+        canvas.drawRightString(W - MARGIN, 10 * mm, f"Page {canvas.getPageNumber()}")
+        canvas.restoreState()
 
-    pdf.set_draw_color(*_RULE_LINE)
-    pdf.line(20, pdf.get_y(), 190, pdf.get_y())
-    pdf.ln(5)
+    # Attach callbacks to page templates
+    doc.pageTemplates[0].onPage = on_cover
+    doc.pageTemplates[1].onPage = on_content
 
-    pdf.set_font("Helvetica", "B", 20)
-    pdf.set_text_color(*_NAVY)
-    pdf.multi_cell(0, 10, "Regulatory Obligations Report",
-                   new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    # ── Story ──────────────────────────────────────────────────────────────
+    story: list = []
 
-    pdf.set_font("Helvetica", "B", 14)
-    pdf.set_text_color(*_NAVY)
-    pdf.cell(0, 9, company, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    # 1. Cover
+    story += _cover_story(
+        company, lt, juris, today,
+        total, critical, important, informational,
+        by_reg, styles,
+    )
+    story.append(NextPageTemplate("Content"))
+    story.append(PageBreak())
 
-    pdf.set_font("Helvetica", "", 9)
-    pdf.set_text_color(*_SLATE)
-    pdf.cell(0, 6, f"{lt}  |  {juris}  |  Generated {today}",
-             new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.ln(8)
+    # 2. Profile summary
+    story += _profile_story(profile, today, styles)
+    story.append(PageBreak())
 
-    # ── Summary metrics ────────────────────────────────────────────────────
-    _section_title(pdf, "Obligation summary")
+    # 3. Obligations grouped by regulation
+    story += _obligations_story(by_reg, styles)
 
-    # Metric boxes
-    metrics = [
-        ("TOTAL",         str(total),         _NAVY),
-        ("CRITICAL",      str(critical),       _SEV_COLORS["critical"]),
-        ("IMPORTANT",     str(important),      _SEV_COLORS["important"]),
-        ("INFORMATIONAL", str(informational),  _SEV_COLORS["informational"]),
-    ]
-    box_w = 40
-    x_start = pdf.get_x()
-    y_start = pdf.get_y()
-    for i, (label, val, color) in enumerate(metrics):
-        x = x_start + i * (box_w + 2)
-        pdf.set_xy(x, y_start)
-        pdf.set_fill_color(*_LIGHT_BG)
-        pdf.rect(x, y_start, box_w, 16, style="F")
-        pdf.set_xy(x + 2, y_start + 2)
-        pdf.set_font("Helvetica", "B", 14)
-        pdf.set_text_color(*color)
-        pdf.cell(box_w - 4, 8, val)
-        pdf.set_xy(x + 2, y_start + 10)
-        pdf.set_font("Helvetica", "", 6)
-        pdf.set_text_color(*_SLATE)
-        pdf.cell(box_w - 4, 5, label)
-
-    pdf.set_xy(x_start, y_start + 20)
-    pdf.ln(4)
-
-    # By regulation
-    _section_title(pdf, "By regulation")
-    for reg, count in sorted(by_reg.items()):
-        color = _REG_COLORS.get(reg, _SLATE)
-        pdf.set_font("Helvetica", "B", 9)
-        pdf.set_text_color(*color)
-        pdf.cell(30, 6, reg)
-        pdf.set_font("Helvetica", "", 9)
-        pdf.set_text_color(*_NAVY)
-        pdf.cell(0, 6, f"{count} obligation{'s' if count != 1 else ''}",
-                 new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.ln(6)
-
-    # Profile snapshot
-    _section_title(pdf, "Company profile")
-    _kv_row(pdf, "Licence type",      lt)
-    _kv_row(pdf, "Jurisdictions",     juris)
-    _kv_row(pdf, "Products",          ", ".join(profile.get("products", [])))
-    _kv_row(pdf, "Customer segments", ", ".join(profile.get("customer_segments", [])))
-    _kv_row(pdf, "Headcount",         profile.get("headcount_range", ""))
-    _kv_row(pdf, "Onboarding volume", profile.get("monthly_onboarding_volume", ""))
-    _kv_row(pdf, "KYC/AML function",  profile.get("kyc_aml_function", ""))
-    _kv_row(pdf, "Remote onboarding", "Yes" if profile.get("has_remote_onboarding") else "No")
-    _kv_row(pdf, "Crypto in scope",   "Yes" if profile.get("has_crypto") else "No")
-
-    # ── Obligations table ──────────────────────────────────────────────────
-    pdf.add_page()
-    _section_title(pdf, f"Full obligations list  ({total} requirements)")
-    _draw_table_header(pdf)
-
-    sev_order = {"critical": 0, "important": 1, "informational": 2}
-    sorted_records = sorted(records, key=lambda r: (sev_order.get(r["severity"], 9),
-                                                     r["regulation_id"],
-                                                     int(r.get("article_reference","0").split()[-1])
-                                                     if r.get("article_reference","").split()
-                                                     else 0))
-
-    fill = False
-    for rec in sorted_records:
-        _draw_table_row(pdf, rec, fill)
-        fill = not fill
-
-    return bytes(pdf.output())
+    doc.build(story)
+    return buf.getvalue()
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────
-
-def _section_title(pdf: FPDF, text: str) -> None:
-    pdf.set_font("Helvetica", "B", 7)
-    pdf.set_text_color(*_SLATE)
-    pdf.cell(0, 5, _clean(text).upper(), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.set_draw_color(*_RULE_LINE)
-    pdf.line(20, pdf.get_y(), 190, pdf.get_y())
-    pdf.ln(3)
+def pdf_filename(company: str) -> str:
+    """Return the formatted filename: CompanyName_RegulatoryProfile_YYYY-MM-DD.pdf"""
+    safe = re.sub(r"[^\w]", "_", company)
+    safe = re.sub(r"_+", "_", safe).strip("_")[:40]
+    return f"{safe}_RegulatoryProfile_{date.today().isoformat()}.pdf"
 
 
-def _kv_row(pdf: FPDF, key: str, val: str) -> None:
-    pdf.set_font("Helvetica", "B", 8)
-    pdf.set_text_color(*_SLATE)
-    pdf.cell(45, 5, _clean(key))
-    pdf.set_font("Helvetica", "", 8)
-    pdf.set_text_color(*_NAVY)
-    pdf.multi_cell(0, 5, _clean(val) or "-", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+# ── Document structure ──────────────────────────────────────────────────────
 
-
-def _draw_table_header(pdf: FPDF) -> None:
-    pdf.set_fill_color(*_LIGHT_BG)
-    pdf.set_draw_color(*_RULE_LINE)
-    pdf.set_font("Helvetica", "B", 7)
-    pdf.set_text_color(*_SLATE)
-    for label, w in [("REGULATION", _COL["reg"]),
-                      ("ARTICLE",   _COL["article"]),
-                      ("OBLIGATION", _COL["obligation"]),
-                      ("DEADLINE",  _COL["deadline"]),
-                      ("SEVERITY",  _COL["severity"])]:
-        pdf.cell(w, _HEAD_H, label, border=1, fill=True)
-    pdf.ln()
-
-
-def _draw_table_row(pdf: FPDF, rec: dict, fill: bool) -> None:
-    sev     = rec.get("severity", "informational")
-    reg_id  = _clean(rec.get("regulation_id", ""))
-    article = _clean(rec.get("article_reference", ""))
-    oblig   = _truncate(rec.get("obligation_summary", ""), 160)
-    ddline  = _clean(_short_date(rec.get("deadline", "")))
-
-    sev_color = _SEV_COLORS.get(sev, _SLATE)
-    reg_color = _REG_COLORS.get(reg_id, _SLATE)
-    bg        = _LIGHT_BG if fill else _WHITE
-
-    # Calculate required row height from obligation text
-    pdf.set_font("Helvetica", "", 7)
-    # Estimate lines needed (approx 11 chars per mm at font size 7, col width 82mm)
-    chars_per_line = int(_COL["obligation"] * 1.6)
-    n_lines = max(1, -(-len(oblig) // chars_per_line))  # ceiling division
-    row_h = max(_ROW_H, n_lines * 4)
-
-    x0 = pdf.get_x()
-    y0 = pdf.get_y()
-
-    # Check page break
-    if y0 + row_h > pdf.page_break_trigger:
-        pdf.add_page()
-        _draw_table_header(pdf)
-        x0, y0 = pdf.get_x(), pdf.get_y()
-
-    # Fill background
-    pdf.set_fill_color(*bg)
-    pdf.rect(x0, y0, sum(_COL.values()), row_h, style="F")
-
-    # Regulation
-    pdf.set_xy(x0, y0 + 1)
-    pdf.set_font("Helvetica", "B", 7)
-    pdf.set_text_color(*reg_color)
-    pdf.cell(_COL["reg"], row_h - 2, reg_id, border="LRB")
-
-    # Article
-    pdf.set_font("Helvetica", "", 7)
-    pdf.set_text_color(*_NAVY)
-    pdf.cell(_COL["article"], row_h - 2, article, border="RB")
-
-    # Obligation — multi_cell
-    x_oblig = pdf.get_x()
-    pdf.set_xy(x_oblig, y0 + 1)
-    pdf.set_text_color(*_NAVY)
-    pdf.set_font("Helvetica", "", 7)
-    pdf.multi_cell(_COL["obligation"], 4, _clean(oblig), border="RB",
-                   new_x=XPos.RIGHT, new_y=YPos.TOP)
-
-    # Deadline
-    x_dl = x0 + _COL["reg"] + _COL["article"] + _COL["obligation"]
-    pdf.set_xy(x_dl, y0 + 1)
-    pdf.set_font("Helvetica", "", 6)
-    pdf.set_text_color(*_SLATE)
-    pdf.cell(_COL["deadline"], row_h - 2, ddline, border="RB")
-
-    # Severity badge
-    pdf.set_font("Helvetica", "B", 6)
-    pdf.set_text_color(*sev_color)
-    pdf.cell(_COL["severity"], row_h - 2, sev.upper(), border="RB")
-
-    pdf.set_xy(x0, y0 + row_h)
-
-
-def _clean(text: str) -> str:
-    """Normalise text to Latin-1 for Helvetica compatibility."""
-    return (
-        str(text)
-        .replace("\u2013", "-")   # en-dash
-        .replace("\u2014", "--")  # em-dash
-        .replace("\u2019", "'")   # right single quote
-        .replace("\u2018", "'")   # left single quote
-        .replace("\u201c", '"')   # left double quote
-        .replace("\u201d", '"')   # right double quote
-        .replace("\u2026", "...")  # ellipsis
-        .replace("\u20ac", "EUR") # euro sign
-        .replace("\u2192", "->")  # right arrow
-        .replace("\u2713", "OK")  # check mark
-        .encode("latin-1", errors="replace")
-        .decode("latin-1")
+def _build_doc(buf: BytesIO, company: str) -> BaseDocTemplate:
+    doc = BaseDocTemplate(
+        buf,
+        pagesize=A4,
+        title=f"{company} — Regulatory Obligations Report",
+        author="Regalith Intelligence",
+        leftMargin=0,
+        rightMargin=0,
+        topMargin=0,
+        bottomMargin=0,
     )
 
+    cover_frame = Frame(
+        MARGIN, 20 * mm,
+        CONTENT_W, H - 30 * mm,
+        leftPadding=0, rightPadding=0,
+        topPadding=0, bottomPadding=0,
+        id="cover",
+    )
+    content_frame = Frame(
+        MARGIN, 20 * mm,
+        CONTENT_W, H - 40 * mm,
+        leftPadding=0, rightPadding=0,
+        topPadding=0, bottomPadding=0,
+        id="content",
+    )
 
-def _truncate(text: str, n: int) -> str:
-    text = _clean(text)
-    return text if len(text) <= n else text[:n - 1] + "..."
+    doc.addPageTemplates([
+        PageTemplate(id="Cover",   frames=[cover_frame]),
+        PageTemplate(id="Content", frames=[content_frame]),
+    ])
+    return doc
 
 
-def _short_date(deadline: str) -> str:
-    # Shorten long deadline strings for table cell
-    if "TBD" in deadline or "expected" in deadline:
+# ── Styles ─────────────────────────────────────────────────────────────────
+
+def _styles() -> dict[str, ParagraphStyle]:
+    base = ParagraphStyle("base", fontName="Helvetica", fontSize=9,
+                          leading=13, textColor=C_NAVY)
+    return {
+        # Cover
+        "cover_label": ParagraphStyle(
+            "cover_label", parent=base,
+            fontName="Helvetica-Bold", fontSize=9,
+            textColor=C_BLUE, letterSpacing=2, leading=13,
+        ),
+        "cover_title": ParagraphStyle(
+            "cover_title", parent=base,
+            fontName="Helvetica-Bold", fontSize=34,
+            textColor=white, leading=40,
+        ),
+        "cover_company": ParagraphStyle(
+            "cover_company", parent=base,
+            fontName="Helvetica-Bold", fontSize=18,
+            textColor=white, leading=24,
+        ),
+        "cover_meta": ParagraphStyle(
+            "cover_meta", parent=base,
+            fontSize=9, textColor=C_SLATE, leading=14,
+        ),
+        # Content headings
+        "h1": ParagraphStyle(
+            "h1", parent=base,
+            fontName="Helvetica-Bold", fontSize=16,
+            textColor=C_NAVY, leading=20, spaceAfter=3 * mm,
+        ),
+        "h2": ParagraphStyle(
+            "h2", parent=base,
+            fontName="Helvetica-Bold", fontSize=12,
+            textColor=C_NAVY, leading=16, spaceBefore=5 * mm, spaceAfter=2 * mm,
+        ),
+        "section_label": ParagraphStyle(
+            "section_label", parent=base,
+            fontName="Helvetica-Bold", fontSize=7,
+            textColor=C_SLATE, letterSpacing=1.5, leading=11,
+            spaceBefore=4 * mm, spaceAfter=1 * mm,
+        ),
+        "body": ParagraphStyle(
+            "body", parent=base,
+            fontSize=9, textColor=C_NAVY, leading=14,
+        ),
+        "body_small": ParagraphStyle(
+            "body_small", parent=base,
+            fontSize=8, textColor=C_SLATE, leading=12,
+        ),
+        # Table cells
+        "tc": ParagraphStyle(
+            "tc", parent=base,
+            fontSize=7.5, textColor=C_NAVY, leading=11,
+        ),
+        "tc_small": ParagraphStyle(
+            "tc_small", parent=base,
+            fontSize=7, textColor=C_SLATE, leading=10,
+        ),
+        "tc_bold": ParagraphStyle(
+            "tc_bold", parent=base,
+            fontName="Helvetica-Bold", fontSize=7.5,
+            textColor=C_NAVY, leading=11,
+        ),
+        # Regulation header in table section
+        "reg_name": ParagraphStyle(
+            "reg_name", parent=base,
+            fontName="Helvetica-Bold", fontSize=11,
+            textColor=C_NAVY, leading=16,
+        ),
+        "reg_count": ParagraphStyle(
+            "reg_count", parent=base,
+            fontSize=8, textColor=C_SLATE, leading=12, spaceAfter=2 * mm,
+        ),
+    }
+
+
+# ── Cover page ──────────────────────────────────────────────────────────────
+
+def _cover_story(
+    company, lt, juris, today,
+    total, critical, important, informational,
+    by_reg, styles,
+) -> list:
+    s = styles
+    items: list = []
+
+    items.append(Spacer(1, 30 * mm))
+
+    items.append(Paragraph("REGALITH INTELLIGENCE", s["cover_label"]))
+    items.append(Spacer(1, 8 * mm))
+
+    items.append(Paragraph("Regulatory<br/>Obligations<br/>Report", s["cover_title"]))
+    items.append(Spacer(1, 8 * mm))
+
+    items.append(HRFlowable(
+        width="100%", thickness=1,
+        color=HexColor("#1e2d4a"), spaceAfter=8 * mm,
+    ))
+
+    items.append(Paragraph(_esc(company), s["cover_company"]))
+    items.append(Spacer(1, 4 * mm))
+    items.append(Paragraph(_esc(f"{lt}  ·  {juris}"), s["cover_meta"]))
+    items.append(Spacer(1, 2 * mm))
+    items.append(Paragraph(f"Date of analysis: {today}", s["cover_meta"]))
+    items.append(Spacer(1, 10 * mm))
+
+    # Summary stats table on dark background
+    reg_cells = []
+    for rid in ("DORA", "MiCA", "PSD3"):
+        cnt = len(by_reg.get(rid, []))
+        if cnt:
+            rc = REG_COLORS.get(rid, C_BLUE)
+            reg_cells.append(
+                Paragraph(
+                    f'<font color="{rc.hexval()}">{cnt}</font><br/>'
+                    f'<font color="#4a6080" size="7">{rid}</font>',
+                    ParagraphStyle("cc", fontName="Helvetica-Bold",
+                                   fontSize=20, leading=24, alignment=TA_CENTER,
+                                   textColor=white),
+                )
+            )
+
+    stat_style = ParagraphStyle(
+        "stat", fontName="Helvetica-Bold", fontSize=22,
+        leading=26, alignment=TA_CENTER, textColor=white,
+    )
+    lbl_style = ParagraphStyle(
+        "lbl", fontName="Helvetica", fontSize=7,
+        leading=10, alignment=TA_CENTER, textColor=C_SLATE,
+    )
+
+    def _stat_cell(val, label, color):
+        return [
+            Paragraph(f'<font color="{color}">{val}</font>', stat_style),
+            Paragraph(label, lbl_style),
+        ]
+
+    stats_data = [
+        [
+            _stat_cell(total,         "TOTAL",         "#e8edf5"),
+            _stat_cell(critical,      "CRITICAL",      "#e84040"),
+            _stat_cell(important,     "IMPORTANT",     "#e8a020"),
+            _stat_cell(informational, "INFORMATIONAL", "#6b8ef5"),
+        ]
+    ]
+
+    stats_t = Table(
+        [[cell[0] for cell in stats_data[0]],
+         [cell[1] for cell in stats_data[0]]],
+        colWidths=[CONTENT_W / 4] * 4,
+    )
+    stats_t.setStyle(TableStyle([
+        ("BACKGROUND",   (0, 0), (-1, -1), C_NAVY),
+        ("ALIGN",        (0, 0), (-1, -1), "CENTER"),
+        ("TOPPADDING",   (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING",(0, 0), (-1, -1), 8),
+        ("LINEABOVE",    (0, 0), (-1, 0),  0.5, HexColor("#1e2d4a")),
+        ("LINEBELOW",    (0, -1),(-1, -1), 0.5, HexColor("#1e2d4a")),
+    ]))
+    items.append(stats_t)
+
+    return items
+
+
+# ── Profile summary page ────────────────────────────────────────────────────
+
+def _profile_story(profile: dict, today: str, styles: dict) -> list:
+    s = styles
+    company = profile.get("company_name", "")
+    items: list = []
+
+    items.append(Paragraph("Company Profile", s["h1"]))
+    items.append(HRFlowable(
+        width="100%", thickness=0.5, color=C_RULE_LIGHT, spaceAfter=4 * mm,
+    ))
+
+    rows = [
+        ("Company name",       profile.get("company_name", "")),
+        ("Licence type",       profile.get("license_type", "")),
+        ("Jurisdictions",      ", ".join(profile.get("jurisdictions", []))),
+        ("Products offered",   ", ".join(profile.get("products", []))),
+        ("Customer segments",  ", ".join(profile.get("customer_segments", []))),
+        ("Headcount",          profile.get("headcount_range", "")),
+        ("Onboarding volume",  profile.get("monthly_onboarding_volume", "")),
+        ("KYC / AML function", profile.get("kyc_aml_function", "")),
+        ("Remote onboarding",  "Yes" if profile.get("has_remote_onboarding") else "No"),
+        ("Crypto in scope",    "Yes" if profile.get("has_crypto") else "No"),
+        ("Date of analysis",   today),
+    ]
+
+    tdata = [
+        [
+            Paragraph(_esc(k), s["tc_bold"]),
+            Paragraph(_esc(v), s["tc"]),
+        ]
+        for k, v in rows
+    ]
+
+    t = Table(tdata, colWidths=[55 * mm, CONTENT_W - 55 * mm])
+    t.setStyle(TableStyle([
+        ("ROWBACKGROUNDS",  (0, 0), (-1, -1), [white, C_LIGHT_BG]),
+        ("TOPPADDING",      (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING",   (0, 0), (-1, -1), 6),
+        ("LEFTPADDING",     (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING",    (0, 0), (-1, -1), 8),
+        ("GRID",            (0, 0), (-1, -1), 0.5, C_RULE_LIGHT),
+        ("VALIGN",          (0, 0), (-1, -1), "TOP"),
+    ]))
+    items.append(t)
+
+    return items
+
+
+# ── Obligations by regulation ───────────────────────────────────────────────
+
+def _obligations_story(by_reg: dict, styles: dict) -> list:
+    s = styles
+    items: list = []
+
+    items.append(Paragraph("Full Obligations List", s["h1"]))
+    items.append(Paragraph(
+        "Grouped by regulation · sorted by severity",
+        s["body_small"],
+    ))
+    items.append(HRFlowable(
+        width="100%", thickness=0.5, color=C_RULE_LIGHT, spaceAfter=6 * mm,
+    ))
+
+    for reg_id in ("DORA", "MiCA", "PSD3"):
+        regs = by_reg.get(reg_id, [])
+        if not regs:
+            continue
+
+        rc     = REG_COLORS.get(reg_id, C_BLUE)
+        rcHex  = rc.hexval()
+        rname  = REG_NAMES.get(reg_id, reg_id)
+
+        # Regulation section header
+        header_block = [
+            Paragraph(
+                f'<font color="{rcHex}"><b>{reg_id}</b></font>'
+                f' <font color="#0a0f1e">— {_esc(rname)}</font>',
+                s["reg_name"],
+            ),
+            Paragraph(
+                f'{len(regs)} obligation{"s" if len(regs) != 1 else ""}',
+                s["reg_count"],
+            ),
+        ]
+        items += header_block
+
+        # Table
+        items.append(_obligation_table(regs, rc, s))
+        items.append(Spacer(1, 8 * mm))
+
+    return items
+
+
+def _obligation_table(records: list, reg_color, styles: dict) -> Table:
+    s = styles
+
+    # Sort: critical → important → informational, then by article number
+    sev_ord = {"critical": 0, "important": 1, "informational": 2}
+    records = sorted(records, key=lambda r: (
+        sev_ord.get(r["severity"], 9),
+        _art_num(r["article_reference"]),
+    ))
+
+    # Column widths: Article | Obligation | Deadline | Severity
+    cw = [28 * mm, 88 * mm, 30 * mm, 24 * mm]
+
+    # Header row
+    def _th(text):
+        return Paragraph(text, ParagraphStyle(
+            "th", fontName="Helvetica-Bold", fontSize=7,
+            textColor=C_SLATE, leading=10,
+        ))
+
+    rows = [[_th("ARTICLE"), _th("OBLIGATION"), _th("DEADLINE"), _th("SEVERITY")]]
+
+    for rec in records:
+        sev      = rec.get("severity", "informational")
+        sc       = SEV_COLORS.get(sev, C_SLATE)
+        scHex    = sc.hexval()
+        rcHex    = reg_color.hexval()
+
+        art_ref  = rec.get("article_reference", "")
+        # Article label: strip leading "Article N — " for title, keep ref separate
+        lbl      = rec.get("article_label", art_ref)
+        title    = lbl.split(" — ", 1)[-1] if " — " in lbl else lbl
+        oblig    = rec.get("obligation_summary", "")
+        deadline = rec.get("deadline", "")
+
+        art_cell  = Paragraph(
+            f'<font color="{rcHex}"><b>{_esc(art_ref)}</b></font>',
+            s["tc_bold"],
+        )
+        oblig_cell = Paragraph(
+            f'<b>{_esc(title)}</b><br/>'
+            f'<font color="#4a6080" size="6.5">{_esc(oblig)}</font>',
+            s["tc"],
+        )
+        dl_cell   = Paragraph(_esc(_short_dl(deadline)), s["tc_small"])
+        sev_cell  = Paragraph(
+            f'<font color="{scHex}"><b>{sev.upper()}</b></font>',
+            s["tc_bold"],
+        )
+
+        rows.append([art_cell, oblig_cell, dl_cell, sev_cell])
+
+    t = Table(rows, colWidths=cw, repeatRows=1)
+    t.setStyle(TableStyle([
+        # Header
+        ("BACKGROUND",    (0, 0), (-1, 0),  C_NAVY),
+        ("TOPPADDING",    (0, 0), (-1, 0),  6),
+        ("BOTTOMPADDING", (0, 0), (-1, 0),  6),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 6),
+        # Alternating data rows
+        ("ROWBACKGROUNDS",(0, 1), (-1, -1), [white, C_LIGHT_BG]),
+        ("TOPPADDING",    (0, 1), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 1), (-1, -1), 6),
+        # Grid
+        ("GRID",          (0, 0), (-1, -1), 0.4, C_RULE_LIGHT),
+        ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+        # Left border accent
+        ("LINEAFTER",     (0, 0), (0, -1),  1.5, reg_color),
+    ]))
+    return t
+
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
+
+def _esc(text: str) -> str:
+    """Escape text for ReportLab XML paragraphs."""
+    return html.escape(str(text), quote=False)
+
+
+def _art_num(ref: str) -> int:
+    m = re.search(r"\d+", ref)
+    return int(m.group()) if m else 0
+
+
+def _short_dl(dl: str) -> str:
+    if "TBD" in dl or "expected" in dl:
         return "TBD ~2027"
-    if "January 2025" in deadline:
+    if "January 2025" in dl:
         return "17 Jan 2025"
-    if "December 2024" in deadline:
+    if "December 2024" in dl:
         return "30 Dec 2024"
-    return deadline[:14]
+    return dl[:18]
