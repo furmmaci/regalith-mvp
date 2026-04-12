@@ -1,6 +1,8 @@
 import streamlit as st
 import plotly.graph_objects as go
 
+from data.legislative_monitor import get_radar_data, DOSSIERS
+
 
 def render(regulations, assessments, portfolio):
     profile = st.session_state.get("profile", {})
@@ -79,6 +81,12 @@ def render(regulations, assessments, portfolio):
     with col_jur:
         st.markdown('<div class="rg-section-title">By jurisdiction</div>', unsafe_allow_html=True)
         _render_distribution_chart(regulations, "jurisdiction")
+
+    st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
+
+    # ── Regulatory Radar ─────────────────────────────────────────────────
+    st.markdown('<div class="rg-section-title">Regulatory Radar</div>', unsafe_allow_html=True)
+    _render_radar(profile)
 
 
 def _fmt(val: float) -> str:
@@ -222,3 +230,127 @@ def _render_distribution_chart(regulations, field):
     )
 
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+# ── Regulatory Radar ────────────────────────────────────────────────────────
+
+def _render_radar(profile: dict) -> None:
+    """Render legislative monitoring cards filtered to company profile."""
+    license_type = profile.get("license_type", "")
+    has_crypto   = profile.get("has_crypto", False)
+
+    try:
+        radar = get_radar_data()
+    except Exception:
+        st.markdown(
+            '<div style="color:#4a6080; font-size:12px; padding:16px;">Radar data unavailable.</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    # Filter dossiers relevant to this profile
+    relevant = []
+    for key, entry in radar.items():
+        scope = entry.get("scope", [])
+        if license_type in scope or (has_crypto and "VASP" in scope):
+            relevant.append((key, entry))
+
+    if not relevant:
+        st.markdown(
+            '<div style="color:#4a6080; font-size:12px; padding:16px;">'
+            'No tracked dossiers match your current profile.</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    # Render in a grid: 2 columns
+    pairs = [relevant[i:i+2] for i in range(0, len(relevant), 2)]
+
+    _STATUS_LABEL = {
+        "red":   ("ACTIVE", "#e84040", "rgba(232,64,64,0.12)"),
+        "amber": ("IN PROGRESS", "#e8a020", "rgba(232,160,32,0.12)"),
+        "blue":  ("ADVANCING", "#3d6af5", "rgba(61,106,245,0.12)"),
+        "gray":  ("MONITORING", "#5a7090", "rgba(90,112,144,0.10)"),
+    }
+
+    for pair in pairs:
+        cols = st.columns(2)
+        for col, (key, entry) in zip(cols, pair):
+            with col:
+                sc          = entry.get("status_class", "gray")
+                label, fc, bg = _STATUS_LABEL.get(sc, _STATUS_LABEL["gray"])
+                color       = entry.get("color", "#5a7090")
+                pct         = entry.get("progress_pct", 0)
+                title       = entry.get("title", key)
+                short       = entry.get("short", key)
+                description = entry.get("description", "")
+                stage       = entry.get("current_stage", "—")
+                last_update = entry.get("last_update", "—")
+                next_ms     = entry.get("next_milestone", "—")
+                expected    = entry.get("expected_date", "TBD")
+
+                pct_safe = max(0, min(100, pct))
+
+                st.markdown(f"""
+                <div style="background:#0f1729; border:1px solid #1e2d4a;
+                            border-left:3px solid {color};
+                            border-radius:6px; padding:16px 18px; margin-bottom:12px;">
+
+                    <!-- Header row -->
+                    <div style="display:flex; justify-content:space-between;
+                                align-items:flex-start; margin-bottom:10px;">
+                        <div>
+                            <span style="font-size:10px; font-weight:700; letter-spacing:0.12em;
+                                         color:{color}; text-transform:uppercase;">{short}</span>
+                            <div style="font-size:13px; font-weight:600; color:#c8d8e8;
+                                        margin-top:3px; line-height:1.35;">{title}</div>
+                        </div>
+                        <span style="font-size:9px; font-weight:700; letter-spacing:0.1em;
+                                     text-transform:uppercase; padding:3px 8px; border-radius:3px;
+                                     background:{bg}; color:{fc}; white-space:nowrap;
+                                     margin-left:10px; flex-shrink:0;">{label}</span>
+                    </div>
+
+                    <!-- Description -->
+                    <div style="font-size:11px; color:#5a7090; margin-bottom:12px;
+                                line-height:1.5;">{description}</div>
+
+                    <!-- Progress bar -->
+                    <div style="margin-bottom:10px;">
+                        <div style="display:flex; justify-content:space-between;
+                                    font-size:9px; color:#4a6080; margin-bottom:4px;">
+                            <span>Legislative progress</span>
+                            <span>{pct_safe}%</span>
+                        </div>
+                        <div style="background:#1a2640; border-radius:2px; height:4px;">
+                            <div style="background:{color}; width:{pct_safe}%; height:4px;
+                                        border-radius:2px;"></div>
+                        </div>
+                    </div>
+
+                    <!-- Status grid -->
+                    <div style="display:grid; grid-template-columns:1fr 1fr;
+                                gap:8px; font-size:11px;">
+                        <div>
+                            <div style="color:#4a6080; font-size:9px; text-transform:uppercase;
+                                        letter-spacing:0.08em; margin-bottom:2px;">Current stage</div>
+                            <div style="color:#8a9bb8; line-height:1.4;">{stage}</div>
+                        </div>
+                        <div>
+                            <div style="color:#4a6080; font-size:9px; text-transform:uppercase;
+                                        letter-spacing:0.08em; margin-bottom:2px;">Last update</div>
+                            <div style="color:#8a9bb8;">{last_update}</div>
+                        </div>
+                        <div>
+                            <div style="color:#4a6080; font-size:9px; text-transform:uppercase;
+                                        letter-spacing:0.08em; margin-bottom:2px;">Next milestone</div>
+                            <div style="color:#a8bbd0; line-height:1.4;">{next_ms}</div>
+                        </div>
+                        <div>
+                            <div style="color:#4a6080; font-size:9px; text-transform:uppercase;
+                                        letter-spacing:0.08em; margin-bottom:2px;">Expected</div>
+                            <div style="color:{fc}; font-weight:600;">{expected}</div>
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)

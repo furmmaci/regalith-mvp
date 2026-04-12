@@ -28,6 +28,11 @@ def _background_refresh():
         invalidate_cache()
     except Exception:
         pass
+    try:
+        from data.legislative_monitor import refresh_radar
+        refresh_radar()
+    except Exception:
+        pass
 
 if "eurlex_refresh_started" not in st.session_state:
     st.session_state["eurlex_refresh_started"] = True
