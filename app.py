@@ -5,7 +5,7 @@ from pathlib import Path
 
 from engine.impact import calculate_impact, aggregate_portfolio_impact
 from utils.styles import CSS
-from views import onboarding, overview, feed, detail, brief, requirements, results
+from views import onboarding, overview, feed, detail, brief, requirements, results, landing
 from data.fetcher import check_and_refresh, get_fetch_status
 
 
@@ -52,7 +52,7 @@ regulations = load_regulations()
 
 # ── Session state defaults ────────────────────────────────────────────────
 if "view" not in st.session_state:
-    st.session_state["view"] = "onboarding"
+    st.session_state["view"] = "landing"
 if "selected_reg_id" not in st.session_state:
     st.session_state["selected_reg_id"] = None
 
@@ -70,9 +70,12 @@ assessments = compute_assessments(profile) if profile else {}
 portfolio = aggregate_portfolio_impact(list(assessments.values())) if profile else {}
 
 
-# ── Onboarding gate ───────────────────────────────────────────────────────
+# ── Pre-profile gate ─────────────────────────────────────────────────────
 if not profile:
-    onboarding.render()
+    if st.session_state.get("view") == "onboarding":
+        onboarding.render()
+    else:
+        landing.render()
     st.stop()
 
 # ── Results dashboard — no sidebar, full focus ────────────────────────────
@@ -199,7 +202,7 @@ with st.sidebar:
 
     if st.button("⟲  Edit profile", use_container_width=True, key="nav_reset"):
         del st.session_state["profile"]
-        st.session_state["view"] = "onboarding"
+        st.session_state["view"] = "landing"
         st.rerun()
 
 
